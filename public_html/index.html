@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AuziTrack — Live Flight Tracker</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #0d1117;
+      color: #c9d1d9;
+      font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+      font-size: 13px;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 24px;
+      background: #161b22;
+      border-bottom: 1px solid #30363d;
+    }
+
+    header h1 {
+      font-size: 16px;
+      font-weight: 600;
+      color: #58a6ff;
+      letter-spacing: 0.04em;
+    }
+
+    #status {
+      font-size: 12px;
+      color: #8b949e;
+    }
+
+    #status .dot {
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #3fb950;
+      margin-right: 6px;
+      animation: pulse 2s infinite;
+    }
+
+    #status.stale .dot { background: #f85149; animation: none; }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.3; }
+    }
+
+    #stats {
+      padding: 10px 24px;
+      background: #161b22;
+      border-bottom: 1px solid #30363d;
+      color: #8b949e;
+      font-size: 12px;
+      display: flex;
+      gap: 24px;
+    }
+
+    #stats span { color: #c9d1d9; }
+
+    .table-wrap {
+      overflow-x: auto;
+      padding: 16px 24px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      white-space: nowrap;
+    }
+
+    thead th {
+      text-align: left;
+      padding: 8px 12px;
+      color: #8b949e;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      border-bottom: 1px solid #30363d;
+      cursor: default;
+    }
+
+    tbody tr {
+      border-bottom: 1px solid #21262d;
+      transition: background 0.15s;
+    }
+
+    tbody tr:hover { background: #1c2128; }
+
+    tbody td {
+      padding: 9px 12px;
+      vertical-align: middle;
+    }
+
+    .flight {
+      font-weight: 600;
+      color: #79c0ff;
+      letter-spacing: 0.06em;
+    }
+
+    .flight.unknown { color: #484f58; font-style: italic; }
+
+    /* Altitude color tiers */
+    .alt-high   { color: #3fb950; }  /* > 25,000 ft */
+    .alt-mid    { color: #d29922; }  /* 10,000–25,000 ft */
+    .alt-low    { color: #f0883e; }  /* < 10,000 ft */
+    .alt-ground { color: #484f58; }  /* 0 or on ground */
+
+    .heading-arrow {
+      display: inline-block;
+      font-size: 16px;
+      line-height: 1;
+      margin-right: 4px;
+    }
+
+    /* Signal bars */
+    .signal {
+      display: inline-flex;
+      align-items: flex-end;
+      gap: 2px;
+      height: 14px;
+    }
+
+    .signal .bar {
+      width: 4px;
+      border-radius: 1px;
+      background: #30363d;
+    }
+
+    .signal .bar.on { background: #3fb950; }
+
+    .signal.weak   .bar.on { background: #f85149; }
+    .signal.medium .bar.on { background: #d29922; }
+    .signal.strong .bar.on { background: #3fb950; }
+
+    .route {
+      color: #8b949e;
+      font-size: 12px;
+    }
+
+    .route .arrow { color: #484f58; margin: 0 4px; }
+    .route .city  { color: #c9d1d9; }
+    .route.pending { color: #484f58; font-style: italic; }
+
+    .stale-row td { opacity: 0.4; }
+
+    #empty {
+      padding: 48px 24px;
+      color: #484f58;
+      text-align: center;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>AuziTrack &mdash; Live Flight Tracker</h1>
+  <div id="status"><span class="dot"></span><span id="status-text">Connecting...</span></div>
+</header>
+
+<div id="stats">
+  Aircraft visible: <span id="stat-count">0</span>
+  &nbsp;&nbsp;|&nbsp;&nbsp;
+  With position: <span id="stat-pos">0</span>
+  &nbsp;&nbsp;|&nbsp;&nbsp;
+  Last update: <span id="stat-time">—</span>
+</div>
+
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>Flight</th>
+        <th>Route</th>
+        <th>Altitude</th>
+        <th>Speed</th>
+        <th>Heading</th>
+        <th>Latitude</th>
+        <th>Longitude</th>
+        <th>Signal</th>
+        <th>Messages</th>
+        <th>Last Seen</th>
+      </tr>
+    </thead>
+    <tbody id="tbody"></tbody>
+  </table>
+  <div id="empty" style="display:none">No aircraft detected. Waiting for signals...</div>
+</div>
+
+<script>
+  const REFRESH_MS = 1000;
+  const STALE_SECS = 30;
+  const API_URL = `${window.location.protocol}//${window.location.hostname}:5000/aircraft`;
+
+  function altClass(alt) {
+    if (alt === null || alt === undefined || alt === '') return 'alt-ground';
+    const n = Number(alt);
+    if (isNaN(n) || n <= 0) return 'alt-ground';
+    if (n < 10000) return 'alt-low';
+    if (n < 25000) return 'alt-mid';
+    return 'alt-high';
+  }
+
+  function fmtAlt(alt) {
+    if (alt === null || alt === undefined || alt === '') return '—';
+    const n = Number(alt);
+    if (isNaN(n)) return alt;
+    return n.toLocaleString() + ' ft';
+  }
+
+  function fmtSpeed(gs) {
+    if (gs === null || gs === undefined || gs === '') return '—';
+    return Math.round(Number(gs)) + ' kt';
+  }
+
+  function headingArrow(track) {
+    if (track === null || track === undefined || track === '') return '—';
+    const deg = ((Number(track) % 360) + 360) % 360;
+    // Pick one of 8 arrows
+    const arrows = ['↑','↗','→','↘','↓','↙','←','↖'];
+    const idx = Math.round(deg / 45) % 8;
+    return `<span class="heading-arrow" style="transform:rotate(${deg}deg);display:inline-block">↑</span>${Math.round(deg)}°`;
+  }
+
+  function signalBars(rssi) {
+    // rssi is negative dBFS: 0 = best, -30+ = weak
+    const val = rssi !== null && rssi !== undefined ? Number(rssi) : -999;
+    let bars, cls;
+    if (val >= -10)      { bars = 4; cls = 'strong'; }
+    else if (val >= -20) { bars = 3; cls = 'strong'; }
+    else if (val >= -30) { bars = 2; cls = 'medium'; }
+    else if (val >= -40) { bars = 1; cls = 'weak'; }
+    else                 { bars = 0; cls = 'weak'; }
+
+    const heights = [4, 7, 10, 13];
+    return `<span class="signal ${cls}">` +
+      heights.map((h, i) =>
+        `<span class="bar${i < bars ? ' on' : ''}" style="height:${h}px"></span>`
+      ).join('') +
+    `</span>`;
+  }
+
+  function fmtCoord(v) {
+    if (v === null || v === undefined || v === '') return '—';
+    return Number(v).toFixed(4);
+  }
+
+  function fmtSeen(s) {
+    if (s === null || s === undefined) return '—';
+    const n = Number(s);
+    if (n < 2) return 'now';
+    return `${Math.round(n)}s ago`;
+  }
+
+  function fmtRoute(origin, dest) {
+    if (!origin && !dest) return `<span class="route pending">looking up...</span>`;
+    if (!origin || !dest) return `<span class="route">—</span>`;
+    return `<span class="route"><span class="city">${origin}</span><span class="arrow">→</span><span class="city">${dest}</span></span>`;
+  }
+
+  async function refresh() {
+    let data;
+    try {
+      const res = await fetch(API_URL + '?_=' + Date.now());
+      data = await res.json();
+    } catch (e) {
+      document.getElementById('status').className = 'stale';
+      document.getElementById('status-text').textContent = 'Cannot reach aircraft.json';
+      return;
+    }
+
+    const aircraft = data.aircraft || [];
+    const now = data.now || (Date.now() / 1000);
+
+    // Sort: aircraft with position first, then by messages desc
+    aircraft.sort((a, b) => {
+      const aPos = (a.lat != null && a.lon != null) ? 1 : 0;
+      const bPos = (b.lat != null && b.lon != null) ? 1 : 0;
+      if (bPos !== aPos) return bPos - aPos;
+      return (b.messages || 0) - (a.messages || 0);
+    });
+
+    const tbody = document.getElementById('tbody');
+    const empty = document.getElementById('empty');
+
+    if (aircraft.length === 0) {
+      tbody.innerHTML = '';
+      empty.style.display = '';
+    } else {
+      empty.style.display = 'none';
+      tbody.innerHTML = aircraft.map(ac => {
+        const isStale = (ac.seen || 0) > STALE_SECS;
+        const flight = ac.flight ? ac.flight.trim() : '';
+        const hasCallsign = !!flight;
+        return `<tr class="${isStale ? 'stale-row' : ''}">
+          <td class="flight${flight ? '' : ' unknown'}">${flight || ac.hex || '—'}</td>
+          <td>${hasCallsign ? fmtRoute(ac.origin, ac.dest) : '<span class="route">—</span>'}</td>
+          <td class="${altClass(ac.alt_baro)}">${fmtAlt(ac.alt_baro)}</td>
+          <td>${fmtSpeed(ac.gs)}</td>
+          <td>${headingArrow(ac.track)}</td>
+          <td>${fmtCoord(ac.lat)}</td>
+          <td>${fmtCoord(ac.lon)}</td>
+          <td>${signalBars(ac.rssi)}</td>
+          <td>${ac.messages != null ? ac.messages.toLocaleString() : '—'}</td>
+          <td>${fmtSeen(ac.seen)}</td>
+        </tr>`;
+      }).join('');
+    }
+
+    // Stats bar
+    const withPos = aircraft.filter(a => a.lat != null && a.lon != null).length;
+    document.getElementById('stat-count').textContent = aircraft.length;
+    document.getElementById('stat-pos').textContent = withPos;
+    document.getElementById('stat-time').textContent = new Date().toLocaleTimeString();
+
+    // Status indicator
+    const statusEl = document.getElementById('status');
+    statusEl.className = '';
+    document.getElementById('status-text').textContent = 'Live';
+  }
+
+  refresh();
+  setInterval(refresh, REFRESH_MS);
+</script>
+</body>
+</html>

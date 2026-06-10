@@ -1,0 +1,6 @@
+# Runtime data — written by dump1090, not source
+aircraft.json
+*.json
+
+# Mac junk
+.DS_Store

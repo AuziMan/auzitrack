@@ -1,0 +1,13 @@
+[Unit]
+Description=AuziTrack Flight Enrichment Service
+After=network.target
+
+[Service]
+User=auziman
+WorkingDirectory=/home/auziman/projects/flight-tracker-antenna/auzitrack/server
+ExecStart=/home/auziman/projects/flight-tracker-antenna/auzitrack/venv/bin/python tracker.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
