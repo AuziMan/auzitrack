@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 AuziTrack backend — reads dump1090 aircraft.json, enriches with
-OpenSky route lookups, and serves /aircraft on port 5000.
+route lookups via api.adsbdb.com, and serves /aircraft on port 5000.
 """
 
 import json
@@ -18,74 +18,40 @@ from flask_cors import CORS
 AIRCRAFT_JSON = Path(
     "/home/auziman/projects/flight-tracker-antenna/dump1090/public_html/aircraft.json"
 )
-OPENSKY_ROUTES_URL = "https://opensky-network.org/api/routes"
-REFRESH_SEC = 1
-ROUTE_CACHE_TTL = 3600   # seconds before a cached route is re-fetched
-LOOKUP_TIMEOUT = 5       # seconds before giving up on an OpenSky request
-
-# ── Airport name map (ICAO → city) ───────────────────────────────────────────
-
-AIRPORTS = {
-    "KABQ": "Albuquerque",  "KASE": "Aspen",        "KATL": "Atlanta",
-    "KAUS": "Austin",       "KBDL": "Hartford",      "KBFI": "Seattle Boeing",
-    "KBNA": "Nashville",    "KBOI": "Boise",         "KBOS": "Boston",
-    "KBUR": "Burbank",      "KBWI": "Baltimore",     "KCHS": "Charleston",
-    "KCLE": "Cleveland",    "KCLT": "Charlotte",     "KCOS": "Colorado Springs",
-    "KCVG": "Cincinnati",   "KDAL": "Dallas Love",   "KDCA": "Washington Reagan",
-    "KDEN": "Denver",       "KDFW": "Dallas DFW",    "KDTW": "Detroit",
-    "KELP": "El Paso",      "KEWR": "Newark",        "KFAT": "Fresno",
-    "KFLL": "Fort Lauderdale", "KGEG": "Spokane",   "KHOU": "Houston Hobby",
-    "KIAD": "Washington Dulles", "KIAH": "Houston IAH", "KIND": "Indianapolis",
-    "KJAX": "Jacksonville", "KJFK": "New York JFK",  "KLAS": "Las Vegas",
-    "KLAX": "Los Angeles",  "KLGA": "New York LGA",  "KLGB": "Long Beach",
-    "KMCI": "Kansas City",  "KMCO": "Orlando",       "KMDW": "Chicago Midway",
-    "KMEM": "Memphis",      "KMIA": "Miami",         "KMKE": "Milwaukee",
-    "KMSP": "Minneapolis",  "KMSY": "New Orleans",   "KOAK": "Oakland",
-    "KOMA": "Omaha",        "KONT": "Ontario",       "KORD": "Chicago O'Hare",
-    "KPDX": "Portland",     "KPHL": "Philadelphia",  "KPHX": "Phoenix",
-    "KPIT": "Pittsburgh",   "KRDU": "Raleigh",       "KRIC": "Richmond",
-    "KRNO": "Reno",         "KRSW": "Fort Myers",    "KSAN": "San Diego",
-    "KSAT": "San Antonio",  "KSAV": "Savannah",      "KSDF": "Louisville",
-    "KSEA": "Seattle",      "KSFO": "San Francisco", "KSJC": "San Jose",
-    "KSLC": "Salt Lake City", "KSMF": "Sacramento",  "KSNA": "Orange County",
-    "KSTL": "St. Louis",    "KTPA": "Tampa",         "KTUL": "Tulsa",
-    "KTUS": "Tucson",
-}
-
-
-def airport_label(icao: str) -> str:
-    """Return city name if known, otherwise the ICAO code."""
-    return AIRPORTS.get(icao, icao)
-
+ADSBDB_URL    = "https://api.adsbdb.com/v0/callsign"
+REFRESH_SEC   = 1
+ROUTE_CACHE_TTL = 3600  # seconds before a cached route is re-fetched
+LOOKUP_TIMEOUT  = 8     # seconds before giving up on a route request
 
 # ── Shared state ──────────────────────────────────────────────────────────────
 
 _state_lock = threading.Lock()
 _state = {"aircraft": [], "now": 0, "messages": 0}
 
-# callsign → {"origin": str|None, "dest": str|None, "cached_at": float}
+# callsign → {"origin": str|None, "dest": str|None, "pending": bool, "cached_at": float}
 _route_cache: dict[str, dict] = {}
 _route_lock = threading.Lock()
 
-# ── OpenSky lookup ────────────────────────────────────────────────────────────
+log = logging.getLogger("tracker")
+
+# ── Route lookup ──────────────────────────────────────────────────────────────
 
 def _fetch_route(callsign: str) -> None:
-    """Background thread: query OpenSky and populate route cache."""
+    """Background thread: query adsbdb.com and populate route cache."""
     origin = dest = None
     try:
-        r = requests.get(
-            OPENSKY_ROUTES_URL,
-            params={"callsign": callsign},
-            timeout=LOOKUP_TIMEOUT,
-        )
+        r = requests.get(f"{ADSBDB_URL}/{callsign}", timeout=LOOKUP_TIMEOUT)
         if r.status_code == 200:
-            data = r.json()
-            route = data.get("route", [])
-            if len(route) >= 2:
-                origin = airport_label(route[0])
-                dest = airport_label(route[-1])
-    except Exception:
-        pass
+            route = r.json().get("response", {}).get("flightroute", {})
+            if route:
+                o = route.get("origin", {})
+                d = route.get("destination", {})
+                origin = o.get("municipality") or o.get("icao_code")
+                dest   = d.get("municipality") or d.get("icao_code")
+        elif r.status_code not in (404, 204):
+            log.warning("adsbdb %s returned HTTP %s", callsign, r.status_code)
+    except Exception as e:
+        log.warning("adsbdb lookup failed for %s: %s", callsign, e)
 
     with _route_lock:
         _route_cache[callsign] = {
@@ -98,16 +64,15 @@ def _fetch_route(callsign: str) -> None:
 
 def _get_route(callsign: str) -> tuple[str | None, str | None, bool]:
     """
-    Return (origin, dest, pending). pending=True means lookup is in flight.
-    If not cached or stale, queues a background fetch and returns pending=True.
+    Return (origin, dest, pending). pending=True while the lookup is in flight.
+    Queues a background fetch on first call; subsequent calls read from cache.
     """
     now = time.time()
     with _route_lock:
         cached = _route_cache.get(callsign)
-        if cached:
-            if (now - cached["cached_at"]) < ROUTE_CACHE_TTL:
-                return cached["origin"], cached["dest"], cached["pending"]
-        # Mark as pending immediately so concurrent refreshes don't double-queue
+        if cached and (now - cached["cached_at"]) < ROUTE_CACHE_TTL:
+            return cached["origin"], cached["dest"], cached["pending"]
+        # Mark pending before releasing the lock so concurrent refreshes don't double-queue
         _route_cache[callsign] = {"origin": None, "dest": None, "pending": True, "cached_at": now}
 
     threading.Thread(target=_fetch_route, args=(callsign,), daemon=True).start()
@@ -138,8 +103,8 @@ def _refresh_loop() -> None:
                 _state["now"] = raw.get("now", time.time())
                 _state["messages"] = raw.get("messages", 0)
 
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("refresh error: %s", e)
 
         time.sleep(REFRESH_SEC)
 
@@ -148,6 +113,7 @@ def _refresh_loop() -> None:
 
 app = Flask(__name__)
 CORS(app)
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 
