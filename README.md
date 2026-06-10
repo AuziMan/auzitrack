@@ -6,7 +6,7 @@ Live ADS-B flight tracker running on a Raspberry Pi. Displays nearby aircraft wi
 
 ## Hardware
 
-- Raspberry Pi (`auzi-pi` — `192.168.0.100`)
+- Raspberry Pi
 - RTL2838 USB dongle (RTL-SDR)
 - Bingfu Dual Band 978/1090MHz magnetic antenna
 
