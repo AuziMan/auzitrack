@@ -260,8 +260,8 @@
     return `${Math.round(n)}s ago`;
   }
 
-  function fmtRoute(origin, dest) {
-    if (!origin && !dest) return `<span class="route pending">looking up...</span>`;
+  function fmtRoute(origin, dest, pending) {
+    if (pending) return `<span class="route pending">...</span>`;
     if (!origin || !dest) return `<span class="route">—</span>`;
     return `<span class="route"><span class="city">${origin}</span><span class="arrow">→</span><span class="city">${dest}</span></span>`;
   }
@@ -302,7 +302,7 @@
         const hasCallsign = !!flight;
         return `<tr class="${isStale ? 'stale-row' : ''}">
           <td class="flight${flight ? '' : ' unknown'}">${flight || ac.hex || '—'}</td>
-          <td>${hasCallsign ? fmtRoute(ac.origin, ac.dest) : '<span class="route">—</span>'}</td>
+          <td>${hasCallsign ? fmtRoute(ac.origin, ac.dest, ac.route_pending) : '<span class="route">—</span>'}</td>
           <td class="${altClass(ac.alt_baro)}">${fmtAlt(ac.alt_baro)}</td>
           <td>${fmtSpeed(ac.gs)}</td>
           <td>${headingArrow(ac.track)}</td>

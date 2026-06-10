@@ -91,26 +91,27 @@ def _fetch_route(callsign: str) -> None:
         _route_cache[callsign] = {
             "origin": origin,
             "dest": dest,
+            "pending": False,
             "cached_at": time.time(),
         }
 
 
-def _get_route(callsign: str) -> tuple[str | None, str | None]:
+def _get_route(callsign: str) -> tuple[str | None, str | None, bool]:
     """
-    Return cached (origin, dest). If not cached or stale, queue a background
-    lookup and return (None, None) for this cycle — result appears next refresh.
+    Return (origin, dest, pending). pending=True means lookup is in flight.
+    If not cached or stale, queues a background fetch and returns pending=True.
     """
     now = time.time()
     with _route_lock:
         cached = _route_cache.get(callsign)
         if cached:
             if (now - cached["cached_at"]) < ROUTE_CACHE_TTL:
-                return cached["origin"], cached["dest"]
+                return cached["origin"], cached["dest"], cached["pending"]
         # Mark as pending immediately so concurrent refreshes don't double-queue
-        _route_cache[callsign] = {"origin": None, "dest": None, "cached_at": now}
+        _route_cache[callsign] = {"origin": None, "dest": None, "pending": True, "cached_at": now}
 
     threading.Thread(target=_fetch_route, args=(callsign,), daemon=True).start()
-    return None, None
+    return None, None, True
 
 
 # ── Refresh loop ──────────────────────────────────────────────────────────────
@@ -126,9 +127,10 @@ def _refresh_loop() -> None:
                 ac = dict(ac)
                 callsign = (ac.get("flight") or "").strip()
                 if callsign:
-                    ac["origin"], ac["dest"] = _get_route(callsign)
+                    ac["origin"], ac["dest"], ac["route_pending"] = _get_route(callsign)
                 else:
                     ac["origin"] = ac["dest"] = None
+                    ac["route_pending"] = False
                 enriched.append(ac)
 
             with _state_lock:
