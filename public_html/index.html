@@ -180,6 +180,7 @@
       <tr>
         <th>Flight</th>
         <th>Route</th>
+        <th>Distance</th>
         <th>Altitude</th>
         <th>Speed</th>
         <th>Heading</th>
@@ -199,6 +200,23 @@
   const REFRESH_MS = 1000;
   const STALE_SECS = 30;
   const API_URL = `${window.location.protocol}//${window.location.hostname}:5000/aircraft`;
+  const MY_LAT = 33.4484;
+  const MY_LON = -112.0740;
+
+  function haversineNm(lat, lon) {
+    const R = 3440.065; // Earth radius in nautical miles
+    const dLat = (lat - MY_LAT) * Math.PI / 180;
+    const dLon = (lon - MY_LON) * Math.PI / 180;
+    const a = Math.sin(dLat / 2) ** 2 +
+              Math.cos(MY_LAT * Math.PI / 180) * Math.cos(lat * Math.PI / 180) *
+              Math.sin(dLon / 2) ** 2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  }
+
+  function fmtDist(nm) {
+    if (nm === null) return '—';
+    return nm < 10 ? nm.toFixed(1) + ' nm' : Math.round(nm) + ' nm';
+  }
 
   function altClass(alt) {
     if (alt === null || alt === undefined || alt === '') return 'alt-ground';
@@ -280,12 +298,15 @@
     const aircraft = data.aircraft || [];
     const now = data.now || (Date.now() / 1000);
 
-    // Sort: aircraft with position first, then by messages desc
+    // Compute distance from home, then sort closest first; no-position aircraft go last
+    aircraft.forEach(ac => {
+      ac._dist = (ac.lat != null && ac.lon != null) ? haversineNm(ac.lat, ac.lon) : null;
+    });
     aircraft.sort((a, b) => {
-      const aPos = (a.lat != null && a.lon != null) ? 1 : 0;
-      const bPos = (b.lat != null && b.lon != null) ? 1 : 0;
-      if (bPos !== aPos) return bPos - aPos;
-      return (b.messages || 0) - (a.messages || 0);
+      if (a._dist === null && b._dist === null) return (b.messages || 0) - (a.messages || 0);
+      if (a._dist === null) return 1;
+      if (b._dist === null) return -1;
+      return a._dist - b._dist;
     });
 
     const tbody = document.getElementById('tbody');
@@ -303,6 +324,7 @@
         return `<tr class="${isStale ? 'stale-row' : ''}">
           <td class="flight${flight ? '' : ' unknown'}">${flight || ac.hex || '—'}</td>
           <td>${hasCallsign ? fmtRoute(ac.origin, ac.dest, ac.route_pending) : '<span class="route">—</span>'}</td>
+          <td>${fmtDist(ac._dist)}</td>
           <td class="${altClass(ac.alt_baro)}">${fmtAlt(ac.alt_baro)}</td>
           <td>${fmtSpeed(ac.gs)}</td>
           <td>${headingArrow(ac.track)}</td>
